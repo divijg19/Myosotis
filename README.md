@@ -1,11 +1,11 @@
-# Myosotis
+# `Myosotis`
 
 > **Deterministic, inspectable memory for long-lived programs**
 
-Myosotis is a **memory engine**, not a database and not a runtime.
+`Myosotis` is a **memory engine**, not a database and not a runtime.
 It provides programs with a persistent, versioned object graph that can be committed, rewound, inspected, and deterministically replayed over time.
 
-While the initial user-facing API targets **Python**, Myosotis itself is **language-agnostic by design**.
+While the initial user-facing API targets **Python**, `Myosotis` itself is **language-agnostic by design**.
 
 ---
 
@@ -26,13 +26,13 @@ Current options are insufficient:
 * JSON → lossy, no identity
 * Databases → heavy, external, semantically mismatched
 
-**Myosotis fills this gap** by introducing a dedicated memory substrate.
+**`Myosotis` fills this gap** by introducing a dedicated memory substrate.
 
 ---
 
-## 2. What Myosotis Is (and Is Not)
+## 2. What `Myosotis` Is (and Is Not)
 
-### Myosotis **is**:
+### `Myosotis` **is**:
 
 * A persistent object graph
 * Versioned and append-only
@@ -40,7 +40,7 @@ Current options are insufficient:
 * Inspectable at every step
 * Embedded (not a service)
 
-### Myosotis **is not**:
+### `Myosotis` **is not**:
 
 * A Python runtime
 * A garbage collector replacement
@@ -48,7 +48,7 @@ Current options are insufficient:
 * A cache
 * A serialization format
 
-Think of Myosotis as:
+Think of `Myosotis` as:
 
 > **Git for your program's memory**
 
@@ -161,7 +161,7 @@ This keeps the engine language-agnostic.
 ## 6. Public Python API (Initial)
 
 ```python
-from myosotis import Memory
+from `Myosotis` import Memory
 
 mem = Memory.open("state.mem")
 
@@ -199,7 +199,7 @@ No in-place mutation of stored history.
 
 ## 8. Determinism Guarantees
 
-Myosotis guarantees:
+`Myosotis` guarantees:
 
 * Ordered mutation application
 * Stable replay results
@@ -235,13 +235,13 @@ These are first-class, not afterthoughts.
 
 ---
 
-## 11. Is Myosotis Python-Specific?
+## 11. Is `Myosotis` Python-Specific?
 
 **No.**
 
 Python is the *first* client language, not the foundation.
 
-Myosotis is:
+`Myosotis` is:
 
 * Language-agnostic at the engine level
 * Designed around opaque handles
@@ -263,7 +263,7 @@ Python is used because:
 
 ## 12. Non-Goals
 
-To keep scope sane, Myosotis explicitly does **not** aim to:
+To keep scope sane, `Myosotis` explicitly does **not** aim to:
 
 * Replace databases
 * Be distributed initially
@@ -293,7 +293,7 @@ To keep scope sane, Myosotis explicitly does **not** aim to:
 
 ## 15. Summary
 
-Myosotis gives programs something they currently lack:
+`Myosotis` gives programs something they currently lack:
 
 > **A reliable way to remember, rewind, and reason about their own state over time.**
 
