@@ -12,7 +12,9 @@ pub fn save(path: &str, memory: &Memory) -> Result<()> {
 pub fn load(path: &str) -> Result<Memory> {
     let data =
         fs::read_to_string(path).with_context(|| format!("Failed to read file: {}", path))?;
-    let mem = serde_json::from_str(&data)?;
+    let mem: Memory = serde_json::from_str(&data)?;
+    // Validate invariants after loading
+    mem.validate().map_err(|e| anyhow::anyhow!(e.to_string()))?;
     Ok(mem)
 }
 

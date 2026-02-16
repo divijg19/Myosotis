@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use myosotis::Memory;
+use myosotis::MyosotisError;
 use myosotis::node::Value;
 use myosotis::storage;
 
@@ -82,6 +83,10 @@ fn main() -> Result<()> {
         } => {
             let mut mem = storage::load(&file)?;
 
+            if !mem.nodes.contains_key(&id) {
+                return Err(anyhow::anyhow!(MyosotisError::NodeNotFound(id)));
+            }
+
             mem.set(id, &key, Value::Str(value.clone()));
 
             storage::save(&file, &mem)?;
@@ -103,32 +108,34 @@ fn main() -> Result<()> {
             let mem = storage::load(&file)?;
 
             if let Some(commit_id) = at {
-                if let Some(commit) = mem.commits.iter().find(|c| c.id == commit_id) {
-                    match commit.changes.get(&id) {
-                        Some(node) => {
-                            println!("Node {} @ commit {}:", id, commit_id);
-                            println!("  type: {}", node.ty);
-                            println!("  fields:");
-                            for (k, v) in &node.fields {
-                                println!("    {}: {:?}", k, v);
-                            }
-                        }
-                        None => println!("Node {} not found in commit {}", id, commit_id),
-                    }
-                } else {
-                    println!("Commit {} not found", commit_id);
+                let commit = mem
+                    .commits
+                    .iter()
+                    .find(|c| c.id == commit_id)
+                    .ok_or_else(|| anyhow::anyhow!(MyosotisError::CommitNotFound(commit_id)))?;
+
+                let node = commit
+                    .changes
+                    .get(&id)
+                    .ok_or_else(|| anyhow::anyhow!(MyosotisError::NodeNotFound(id)))?;
+
+                println!("Node {} @ commit {}:", id, commit_id);
+                println!("  type: {}", node.ty);
+                println!("  fields:");
+                for (k, v) in &node.fields {
+                    println!("    {}: {:?}", k, v);
                 }
             } else {
-                match mem.nodes.get(&id) {
-                    Some(node) => {
-                        println!("Node {} (current):", id);
-                        println!("  type: {}", node.ty);
-                        println!("  fields:");
-                        for (k, v) in &node.fields {
-                            println!("    {}: {:?}", k, v);
-                        }
-                    }
-                    None => println!("Node {} not found in current state", id),
+                let node = mem
+                    .nodes
+                    .get(&id)
+                    .ok_or_else(|| anyhow::anyhow!(MyosotisError::NodeNotFound(id)))?;
+
+                println!("Node {} (current):", id);
+                println!("  type: {}", node.ty);
+                println!("  fields:");
+                for (k, v) in &node.fields {
+                    println!("    {}: {:?}", k, v);
                 }
             }
         }
