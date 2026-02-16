@@ -17,7 +17,9 @@ pub enum Mutation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Commit {
     pub id: u64,
-    pub message: Option<String>,
     pub parent: Option<u64>,
+    pub parent_hash: Option<[u8; 32]>,
+    pub hash: [u8; 32],
+    pub message: Option<String>,
     pub mutations: Vec<Mutation>,
 }
