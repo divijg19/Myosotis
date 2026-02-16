@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 pub type NodeId = u64;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Value {
     Int(i64),
     Float(f64),
@@ -14,7 +14,7 @@ pub enum Value {
     Map(HashMap<String, Value>),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Node {
     pub id: NodeId,
     pub ty: String,
