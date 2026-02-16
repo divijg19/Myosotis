@@ -2,168 +2,282 @@
 
 > **Deterministic, inspectable memory for long-lived programs**
 
-`Myosotis` is a **memory engine**, not a database and not a runtime.
-It provides programs with a persistent, versioned object graph that can be committed, rewound, inspected, and deterministically replayed over time.
+`Myosotis` is an **embedded, versioned object graph engine** designed for programs that need durable, replayable, and structurally transparent memory.
 
-While the initial user-facing API targets **Python**, `Myosotis` itself is **language-agnostic by design**.
+Unlike traditional databases or event logs, Myosotis is designed to model in-memory object identity and relationships directly, not tables or external schemas.
+
+It is not a database, runtime or subservient cache.
+Instead, it runs in-process as a **state substrate**.
+
+Hence, the guiding goals and design principles are:
+**Stable identity + graph-native + embedded + deterministic replay**
 
 ---
 
-## 1. Motivation
+# 1. Why `Myosotis` Exists
 
-Modern programs increasingly behave like *ongoing processes* rather than short-lived scripts:
+Modern programs increasingly behave like ongoing processes rather than disposable scripts:
 
-* AI agents that evolve goals
-* Notebooks that act as living systems
+* AI agents with evolving goals
 * Simulations and games with rich internal state
-* Local-first applications with long memory
+* Long-running services
+* Interactive notebooks that accumulate knowledge
+* Local-first applications with persistent context
 
-Python excels at expressing *intent*, but it lacks a first-class concept of **long-lived, inspectable memory**.
+Python (and many other languages) excel at expressing *intent*, but they lack a first-class concept of:
 
-Current options are insufficient:
+> Long-lived, inspectable, deterministic memory.
+
+Current approaches are inadequate:
 
 * `pickle` → unsafe, opaque, brittle
-* JSON → lossy, no identity
-* Databases → heavy, external, semantically mismatched
+* JSON → lossy, no identity, no history
+* Databases → external, schema-heavy, semantically mismatched
+* Ad-hoc state management → fragile and hard to debug
 
-**`Myosotis` fills this gap** by introducing a dedicated memory substrate.
-
----
-
-## 2. What `Myosotis` Is (and Is Not)
-
-### `Myosotis` **is**:
-
-* A persistent object graph
-* Versioned and append-only
-* Deterministic and replayable
-* Inspectable at every step
-* Embedded (not a service)
-
-### `Myosotis` **is not**:
-
-* A Python runtime
-* A garbage collector replacement
-* A distributed database
-* A cache
-* A serialization format
-
-Think of `Myosotis` as:
-
-> **Git for your program's memory**
+`Myosotis` introduces a dedicated memory layer that treats **state as a structured, versioned, replayable graph**.
 
 ---
 
-## 3. Core Concepts
+# 2. `Myosotis` is:
 
-### 3.1 Memory Graph
+* An **embedded object graph**
+* Append-only and versioned
+* Deterministic by construction
+* Replayable from a mutation log
+* Fully inspectable at every commit
+* Language-agnostic at the engine layer
 
-All state is represented as a graph:
+Think of it as:
 
-* **Nodes** → entities (Agent, World, Document, etc.)
-* **Edges** → attributes and relationships
-* **Values** → primitives or references
+> **Git for structured program state**
 
-Object identity is stable and explicit.
-
----
-
-### 3.2 Commits
-
-A commit records:
-
-* A set of changes (diffs)
-* Metadata (timestamp, label, optional user data)
-* A pointer to the previous commit
-
-Commits are:
-
-* Append-only
-* Immutable
-* Ordered
+But instead of tracking text files, it tracks a program’s internal memory graph.
 
 ---
 
-### 3.3 Rewind & Replay
+# 3. What `Myosotis` Is Not
+
+To keep scope precise and architectural integrity intact, `Myosotis` does **not** aim to:
+
+* Replace databases
+* Replace Python’s garbage collector
+* Act as a distributed system
+* Provide automatic scaling
+* Optimize user code execution
+* Replace programming language runtimes
+* Act as a generic serialization format
+
+It solves one problem:
+
+> Making program memory persistent, versioned, and inspectable.
+
+---
+
+# 4. Core Design Principles
+
+## 4.1 Determinism First
+
+Given:
+
+* An initial state
+* An ordered sequence of mutations
+
+The resulting state will be identical across replays.
+
+Mutation order is explicit.
+History is append-only.
+State is never implicitly rewritten.
+
+---
+
+## 4.2 Stable Identity
+
+Each entity in memory:
+
+* Has a stable, persistent ID
+* Maintains referential integrity
+* Is independent of language-level object addresses
+
+Identity does not disappear between runs.
+
+---
+
+## 4.3 Versioned State
+
+State is never mutated in-place historically.
+
+Instead:
+
+* Changes are recorded as commits
+* Commits are immutable
+* History is replayable
+* Any past commit can be reconstructed
+
+---
+
+## 4.4 Inspectability Over Magic
 
 Memory can be:
 
-* Rewound to any previous commit
-* Replayed deterministically from the log
-* Inspected at any historical point
+* Enumerated
+* Traversed
+* Diffed between commits
+* Viewed historically
+
+No opaque blobs.
+No hidden mutation.
+
+---
+
+## 4.5 Embedded by Default
+
+`Myosotis` runs:
+
+* In-process
+* As a single engine
+* Backed by a file
+
+It is not a background service.
+
+---
+
+# 5. Architecture
+
+`Myosotis` is implemented in **Rust** from the ground up to ensure:
+
+* Memory safety
+* Deterministic mutation ordering
+* Stable persistence guarantees
+* Strong internal invariants
+
+Architecture overview:
+
+```
+┌──────────────────┐
+│   Client Layer   │  (Python, Rust, others)
+└────────┬─────────┘
+         │ Handles / API
+┌────────▼─────────┐
+│   Engine Core    │  (Rust)
+│  - Object graph  │
+│  - Versioning    │
+│  - Commit log    │
+│  - Replay logic  │
+│  - Diff engine   │
+└────────┬─────────┘
+         │
+┌────────▼─────────┐
+│  Storage Layer   │
+│  - Append-only   │
+│  - Log structured│
+│  - Crash safe    │
+└──────────────────┘
+```
+
+The Rust engine is the **single source of truth**.
+
+---
+
+# 6. Data Model
+
+## 6.1 Nodes
+
+Each node contains:
+
+* `NodeId` (u64)
+* `Type` (string)
+* `Fields` (map of string → value)
+
+## 6.2 Values
+
+Supported value types:
+
+* Integer
+* Float
+* Boolean
+* String
+* Reference (NodeId)
+* List
+* Map
+
+Arbitrary host-language objects are not stored directly.
+
+---
+
+# 7. Commits
+
+A commit records:
+
+* A set of mutations (diff)
+* Metadata (timestamp, optional label)
+* Pointer to the previous commit
+
+Commits are:
+
+* Immutable
+* Append-only
+* Totally ordered (linear history in initial versions)
+
+---
+
+# 8. Replay Model
+
+The engine can:
+
+* Reconstruct any historical state
+* Replay from genesis
+* Produce deterministic results
 
 This enables:
 
 * Time-travel debugging
-* Deterministic agent replay
+* Agent replay
+* Simulation auditing
 * State introspection
 
 ---
 
-### 3.4 Handles (Language Boundary)
+# 9. Concurrency Model (Initial Scope)
 
-User languages (e.g. Python) never own memory directly.
+* Single writer
+* Multiple readers
+* Explicit commit boundaries
 
-They interact via **handles**:
-
-* Opaque references to memory nodes
-* Stable across commits
-* Cheap to copy
-
-This keeps the engine language-agnostic.
+Parallel mutation is out of scope for initial releases.
 
 ---
 
-## 4. Architecture Overview
+# 10. CLI (Initial Surface)
 
-```
-┌──────────────────┐
-│   User Language  │  (Python today)
-└────────┬─────────┘
-         │ handles / API
-┌────────▼─────────┐
-│   Engine Layer   │  (Go v1 → Rust v2)
-│  - Graph logic   │
-│  - Versioning    │
-│  - Replay        │
-└────────┬─────────┘
-         │ raw memory interface
-┌────────▼─────────┐
-│ Substrate Layer  │  (Zig v3, optional)
-│ - Allocators     │
-│ - mmap storage   │
-│ - snapshots      │
-└──────────────────┘
+The first interface to `Myosotis` is a Rust-based CLI.
+
+Example:
+
+```bash
+myo init state.myo
+myo create Agent
+myo set <node_id> goal "Explore"
+myo commit "initial goal"
+myo history
+myo show <node_id> --at <commit>
+myo diff <commit_a> <commit_b>
 ```
 
----
-
-## 5. Language Roadmap
-
-### v1 — Go (Proof of Semantics)
-
-* Purpose: validate the model
-* Focus: correctness, clarity, API shape
-* Tradeoff: GC-based, not fully deterministic internally
-
-### v2 — Rust (Engine of Record)
-
-* Purpose: safety, determinism, performance
-* Focus: memory safety, replay guarantees, concurrency control
-
-### v3 — Zig (Optional Substrate)
-
-* Purpose: allocator control, layout determinism
-* Focus: mmap, arenas, snapshot efficiency
+The CLI uses the same engine as the library.
 
 ---
 
-## 6. Public Python API (Initial)
+# 11. Python Integration (After Engine Stabilizes)
+
+Python is the first client language.
+
+Example:
 
 ```python
-from `Myosotis` import Memory
+from myosotis import Memory
 
-mem = Memory.open("state.mem")
+mem = Memory.open("state.myo")
 
 agent = mem.create("Agent", name="Iris")
 agent.goal = "Explore ideas"
@@ -171,131 +285,84 @@ agent.goal = "Explore ideas"
 mem.commit(label="initial goal")
 ```
 
-### Rewind
+Python interacts via **handles**, not raw memory ownership.
 
-```python
-mem.rewind(steps=1)
-```
-
-### Inspect
-
-```python
-mem.inspect()
-mem.diff(commit_a, commit_b)
-```
+The engine remains language-agnostic.
 
 ---
 
-## 7. Persistence Model
+# 12. Persistence Model
 
-* Append-only event log
-* Stable IDs
-* Versioned on-disk format
-* Replayable from scratch
+* Append-only commit log
+* Stable on-disk format
+* Crash-safe writes
+* Deterministic replay from file
 
-No in-place mutation of stored history.
+History is never mutated.
 
 ---
 
-## 8. Determinism Guarantees
+# 13. Guarantees
 
 `Myosotis` guarantees:
 
-* Ordered mutation application
-* Stable replay results
-* Explicit mutation boundaries
+* Deterministic mutation ordering
+* Stable identity across sessions
+* Immutable historical commits
+* Replayable state reconstruction
 
-It does **not** guarantee:
+It does not guarantee:
 
+* Distributed consistency
+* Cross-machine floating-point bit identity
 * Real-time determinism
-* Cross-machine bit-identical floating point (yet)
 
 ---
 
-## 9. Concurrency Model (Initial Scope)
+# 14. Roadmap
 
-* Single-writer
-* Multi-reader
-* Explicit commit boundaries
+### v0
 
-True parallel mutation is deferred to v2+.
+* Rust engine
+* CLI interface
+* Linear history
+* Basic diff support
 
----
+### v1
 
-## 10. Introspection & Debugging
+* Stable on-disk format
+* Full diff engine
+* Python bindings
+* Inspection tooling
 
-Built-in inspection tools:
-
-* Memory statistics
-* Commit graph visualization (text)
-* Structured diffs
-* Read-only historical views
-
-These are first-class, not afterthoughts.
+Future optimization layers (allocator tuning, snapshot optimization, substrate experimentation) remain possible but are not required for correctness.
 
 ---
 
-## 11. Is `Myosotis` Python-Specific?
+# 15. Philosophy
 
-**No.**
-
-Python is the *first* client language, not the foundation.
-
-`Myosotis` is:
-
-* Language-agnostic at the engine level
-* Designed around opaque handles
-* Accessible via FFI or IPC
-
-Potential future frontends:
-
-* Rust
-* Go
-* Mojo
-* JavaScript (via WASM)
-
-Python is used because:
-
-* It benefits the most today
-* It excels as a control and intent language
-
----
-
-## 12. Non-Goals
-
-To keep scope sane, `Myosotis` explicitly does **not** aim to:
-
-* Replace databases
-* Be distributed initially
-* Replace Python GC
-* Automatically optimize user code
-* Compete with existing runtimes
-
----
-
-## 13. Project Philosophy
-
+* Determinism before convenience
 * Semantics before speed
-* Inspectability over magic
-* Explicit over implicit
-* Memory as a first-class concept
+* Inspectability before abstraction
+* Stability before expansion
+
+`Myosotis` treats memory as a first-class system component, not an implementation detail.
 
 ---
 
-## 14. Status
+# 16. Summary
 
-* v0.x: Go-based semantic exploration
-* v1: Stable API, usable engine
-* v2: Rust rewrite
-* v3: Zig substrate (optional)
+`Myosotis` provides something most programs currently lack:
 
----
+> A reliable way to remember, rewind, and reason about their own internal state over time.
 
-## 15. Summary
+It is:
 
-`Myosotis` gives programs something they currently lack:
+* Embedded
+* Deterministic
+* Versioned
+* Inspectable
 
-> **A reliable way to remember, rewind, and reason about their own state over time.**
+Python is the first client.
 
-Python is the entry point.
-The idea is universal.
+The engine is universal.
