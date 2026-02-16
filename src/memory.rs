@@ -2,6 +2,7 @@ use crate::commit::{Commit, Mutation};
 use crate::error::MyosotisError;
 use crate::node::{Node, NodeId, Value};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,6 +25,106 @@ impl Memory {
             head_state: HashMap::new(),
             pending_mutations: Vec::new(),
         }
+    }
+
+    pub fn compute_commit_hash(
+        parent_hash: Option<[u8; 32]>,
+        message: &Option<String>,
+        mutations: &[Mutation],
+    ) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+
+        // Parent hash: 32 bytes
+        match parent_hash {
+            Some(ph) => hasher.update(ph),
+            None => hasher.update([0u8; 32]),
+        }
+
+        // Message: length u64 BE + bytes (empty if None)
+        if let Some(msg) = message {
+            let len = msg.len() as u64;
+            hasher.update(len.to_be_bytes());
+            hasher.update(msg.as_bytes());
+        } else {
+            hasher.update(0u64.to_be_bytes());
+        }
+
+        // Mutations in order
+        for m in mutations {
+            match m {
+                Mutation::CreateNode { id, ty } => {
+                    hasher.update([0x01u8]);
+                    hasher.update(id.to_be_bytes());
+                    let tlen = ty.len() as u64;
+                    hasher.update(tlen.to_be_bytes());
+                    hasher.update(ty.as_bytes());
+                }
+                Mutation::SetField { id, key, value } => {
+                    hasher.update([0x02u8]);
+                    hasher.update(id.to_be_bytes());
+                    let klen = key.len() as u64;
+                    hasher.update(klen.to_be_bytes());
+                    hasher.update(key.as_bytes());
+                    // serialize value canonically
+                    fn write_value(hasher: &mut Sha256, v: &Value) {
+                        match v {
+                            Value::Int(i) => {
+                                hasher.update([0x01u8]);
+                                hasher.update(i.to_be_bytes());
+                            }
+                            Value::Float(f) => {
+                                hasher.update([0x02u8]);
+                                hasher.update(f.to_bits().to_be_bytes());
+                            }
+                            Value::Bool(b) => {
+                                hasher.update([0x03u8]);
+                                hasher.update([*b as u8]);
+                            }
+                            Value::Str(s) => {
+                                hasher.update([0x04u8]);
+                                let slen = s.len() as u64;
+                                hasher.update(slen.to_be_bytes());
+                                hasher.update(s.as_bytes());
+                            }
+                            Value::Ref(rid) => {
+                                hasher.update([0x05u8]);
+                                hasher.update(rid.to_be_bytes());
+                            }
+                            Value::List(vec) => {
+                                hasher.update([0x06u8]);
+                                let len = vec.len() as u64;
+                                hasher.update(len.to_be_bytes());
+                                for item in vec {
+                                    write_value(hasher, item);
+                                }
+                            }
+                            Value::Map(map) => {
+                                hasher.update([0x07u8]);
+                                // keys sorted
+                                let mut keys: Vec<&String> = map.keys().collect();
+                                keys.sort();
+                                let len = keys.len() as u64;
+                                hasher.update(len.to_be_bytes());
+                                for k in keys {
+                                    let v = map.get(k).unwrap();
+                                    let klen = k.len() as u64;
+                                    hasher.update(klen.to_be_bytes());
+                                    hasher.update(k.as_bytes());
+                                    write_value(hasher, v);
+                                }
+                            }
+                        }
+                    }
+
+                    write_value(&mut hasher, value);
+                }
+            }
+        }
+
+        let result = hasher.finalize();
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&result[..32]);
+        out
     }
 
     pub fn create(&mut self, ty: &str) -> NodeId {
@@ -149,10 +250,16 @@ impl Memory {
             }
         }
 
+        // compute parent_hash and commit hash
+        let parent_hash = self.commits.last().map(|c| c.hash);
+        let hash = Self::compute_commit_hash(parent_hash, &message, &mutations);
+
         let commit = Commit {
             id: commit_id,
-            message,
             parent,
+            parent_hash,
+            hash,
+            message,
             mutations,
         };
 

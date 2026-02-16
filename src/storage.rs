@@ -34,6 +34,24 @@ pub fn load(path: &str) -> Result<Memory> {
     // Validate commit chain basic invariants before replay
     mem.validate().map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
+    // Verify hash chain and recompute hashes
+    let mut prev_hash: Option<[u8; 32]> = None;
+    for commit in &mem.commits {
+        // parent id was validated; check parent_hash matches prev_hash
+        if commit.parent_hash != prev_hash {
+            return Err(anyhow::anyhow!(
+                crate::error::MyosotisError::ParentHashMismatch(commit.id)
+            ));
+        }
+
+        let recomputed = Memory::compute_commit_hash(prev_hash, &commit.message, &commit.mutations);
+        if commit.hash != recomputed {
+            return Err(anyhow::anyhow!(crate::error::MyosotisError::InvalidHash));
+        }
+
+        prev_hash = Some(commit.hash);
+    }
+
     // Reconstruct head_state via replay
     let state = Memory::replay(&mem.commits).map_err(|e| anyhow::anyhow!(e.to_string()))?;
     mem.head_state = state;

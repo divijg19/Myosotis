@@ -19,4 +19,12 @@ pub enum MyosotisError {
 
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+    #[error("Invalid hash encountered")]
+    InvalidHash,
+
+    #[error("Parent hash mismatch at commit {0}")]
+    ParentHashMismatch(u64),
+
+    #[error("Corrupt commit chain: {0}")]
+    CorruptCommitChain(String),
 }

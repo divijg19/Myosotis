@@ -70,15 +70,21 @@ fn invalid_mutation_fails_on_load() -> Result<(), Box<dyn std::error::Error>> {
     cleanup(path);
 
     // Construct a commit where first mutation is SetField (invalid)
+    let mutations = vec![Mutation::SetField {
+        id: 1,
+        key: "x".to_string(),
+        value: Value::Str("v".to_string()),
+    }];
+
+    let hash = Memory::compute_commit_hash(None, &Some("bad".to_string()), &mutations);
+
     let bad_commit = myosotis::commit::Commit {
         id: 1,
-        message: Some("bad".to_string()),
         parent: None,
-        mutations: vec![Mutation::SetField {
-            id: 1,
-            key: "x".to_string(),
-            value: Value::Str("v".to_string()),
-        }],
+        parent_hash: None,
+        hash,
+        message: Some("bad".to_string()),
+        mutations,
     };
 
     let mut mem = Memory::new();
@@ -102,25 +108,33 @@ fn corrupt_parent_chain_fails_load() -> Result<(), Box<dyn std::error::Error>> {
     cleanup(path);
 
     // Create two commits, but make parent of 2 incorrect
+    let m1 = vec![Mutation::CreateNode {
+        id: 1,
+        ty: "Agent".to_string(),
+    }];
+    let h1 = Memory::compute_commit_hash(None, &Some("c1".to_string()), &m1);
     let c1 = myosotis::commit::Commit {
         id: 1,
-        message: Some("c1".to_string()),
         parent: None,
-        mutations: vec![Mutation::CreateNode {
-            id: 1,
-            ty: "Agent".to_string(),
-        }],
+        parent_hash: None,
+        hash: h1,
+        message: Some("c1".to_string()),
+        mutations: m1,
     };
 
+    let m2 = vec![Mutation::SetField {
+        id: 1,
+        key: "goal".to_string(),
+        value: Value::Str("Explore".to_string()),
+    }];
+    let h2 = Memory::compute_commit_hash(Some(h1), &Some("c2".to_string()), &m2);
     let c2 = myosotis::commit::Commit {
         id: 2,
-        message: Some("c2".to_string()),
         parent: Some(999), // invalid
-        mutations: vec![Mutation::SetField {
-            id: 1,
-            key: "goal".to_string(),
-            value: Value::Str("Explore".to_string()),
-        }],
+        parent_hash: Some(h1),
+        hash: h2,
+        message: Some("c2".to_string()),
+        mutations: m2,
     };
 
     let mut mem = Memory::new();
