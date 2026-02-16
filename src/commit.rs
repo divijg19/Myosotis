@@ -1,11 +1,23 @@
-use crate::node::NodeId;
+use crate::node::{NodeId, Value};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Mutation {
+    CreateNode {
+        id: NodeId,
+        ty: String,
+    },
+    SetField {
+        id: NodeId,
+        key: String,
+        value: Value,
+    },
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Commit {
     pub id: u64,
     pub message: Option<String>,
     pub parent: Option<u64>,
-    pub changes: HashMap<NodeId, crate::node::Node>,
+    pub mutations: Vec<Mutation>,
 }
