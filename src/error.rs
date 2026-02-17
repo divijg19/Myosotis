@@ -27,4 +27,13 @@ pub enum MyosotisError {
 
     #[error("Corrupt commit chain: {0}")]
     CorruptCommitChain(String),
+
+    #[error("Invalid checkpoint")]
+    InvalidCheckpoint,
+
+    #[error("Checkpoint state hash mismatch")]
+    CheckpointHashMismatch,
+
+    #[error("Checkpoint commit mismatch")]
+    CheckpointCommitMismatch,
 }

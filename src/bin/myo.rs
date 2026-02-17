@@ -108,14 +108,9 @@ fn main() -> Result<()> {
             let mem = storage::load(&file)?;
 
             if let Some(commit_id) = at {
-                let idx = mem
-                    .commits
-                    .iter()
-                    .position(|c| c.id == commit_id)
-                    .ok_or_else(|| anyhow::anyhow!(MyosotisError::CommitNotFound(commit_id)))?;
-
-                let prefix = &mem.commits[..=idx];
-                let state = Memory::replay(prefix).map_err(|e| anyhow::anyhow!(e))?;
+                let state = mem
+                    .state_at_commit(commit_id)
+                    .map_err(|e| anyhow::anyhow!(e))?;
 
                 let node = state
                     .get(&id)

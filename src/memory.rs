@@ -5,9 +5,20 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
+pub const CHECKPOINT_INTERVAL: usize = 50;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Checkpoint {
+    pub commit_id: u64,
+    pub commit_hash: [u8; 32],
+    pub state_hash: [u8; 32],
+    pub state: HashMap<NodeId, Node>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Memory {
     pub commits: Vec<Commit>,
+    pub checkpoints: Vec<Checkpoint>,
     pub next_node_id: NodeId,
 
     #[serde(skip)]
@@ -21,9 +32,60 @@ impl Memory {
     pub fn new() -> Self {
         Self {
             commits: Vec::new(),
+            checkpoints: Vec::new(),
             next_node_id: 1,
             head_state: HashMap::new(),
             pending_mutations: Vec::new(),
+        }
+    }
+
+    fn write_value_canonical(buf: &mut Vec<u8>, value: &Value) {
+        match value {
+            Value::Int(v) => {
+                buf.push(0x01);
+                buf.extend_from_slice(&v.to_be_bytes());
+            }
+            Value::Float(v) => {
+                buf.push(0x02);
+                buf.extend_from_slice(&v.to_bits().to_be_bytes());
+            }
+            Value::Bool(v) => {
+                buf.push(0x03);
+                buf.push(if *v { 0x01 } else { 0x00 });
+            }
+            Value::Str(v) => {
+                buf.push(0x04);
+                let len = v.len() as u64;
+                buf.extend_from_slice(&len.to_be_bytes());
+                buf.extend_from_slice(v.as_bytes());
+            }
+            Value::Ref(v) => {
+                buf.push(0x05);
+                buf.extend_from_slice(&v.to_be_bytes());
+            }
+            Value::List(values) => {
+                buf.push(0x06);
+                let len = values.len() as u64;
+                buf.extend_from_slice(&len.to_be_bytes());
+                for item in values {
+                    Self::write_value_canonical(buf, item);
+                }
+            }
+            Value::Map(map) => {
+                buf.push(0x07);
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort();
+                let len = keys.len() as u64;
+                buf.extend_from_slice(&len.to_be_bytes());
+                for key in keys {
+                    let key_len = key.len() as u64;
+                    buf.extend_from_slice(&key_len.to_be_bytes());
+                    buf.extend_from_slice(key.as_bytes());
+                    if let Some(map_value) = map.get(key) {
+                        Self::write_value_canonical(buf, map_value);
+                    }
+                }
+            }
         }
     }
 
@@ -32,98 +94,78 @@ impl Memory {
         message: &Option<String>,
         mutations: &[Mutation],
     ) -> [u8; 32] {
-        let mut hasher = Sha256::new();
+        let mut bytes = Vec::new();
 
-        // Parent hash: 32 bytes
         match parent_hash {
-            Some(ph) => hasher.update(ph),
-            None => hasher.update([0u8; 32]),
+            Some(ph) => bytes.extend_from_slice(&ph),
+            None => bytes.extend_from_slice(&[0u8; 32]),
         }
 
-        // Message: length u64 BE + bytes (empty if None)
         if let Some(msg) = message {
             let len = msg.len() as u64;
-            hasher.update(len.to_be_bytes());
-            hasher.update(msg.as_bytes());
+            bytes.extend_from_slice(&len.to_be_bytes());
+            bytes.extend_from_slice(msg.as_bytes());
         } else {
-            hasher.update(0u64.to_be_bytes());
+            bytes.extend_from_slice(&0u64.to_be_bytes());
         }
 
-        // Mutations in order
         for m in mutations {
             match m {
                 Mutation::CreateNode { id, ty } => {
-                    hasher.update([0x01u8]);
-                    hasher.update(id.to_be_bytes());
+                    bytes.push(0x01);
+                    bytes.extend_from_slice(&id.to_be_bytes());
                     let tlen = ty.len() as u64;
-                    hasher.update(tlen.to_be_bytes());
-                    hasher.update(ty.as_bytes());
+                    bytes.extend_from_slice(&tlen.to_be_bytes());
+                    bytes.extend_from_slice(ty.as_bytes());
                 }
                 Mutation::SetField { id, key, value } => {
-                    hasher.update([0x02u8]);
-                    hasher.update(id.to_be_bytes());
+                    bytes.push(0x02);
+                    bytes.extend_from_slice(&id.to_be_bytes());
                     let klen = key.len() as u64;
-                    hasher.update(klen.to_be_bytes());
-                    hasher.update(key.as_bytes());
-                    // serialize value canonically
-                    fn write_value(hasher: &mut Sha256, v: &Value) {
-                        match v {
-                            Value::Int(i) => {
-                                hasher.update([0x01u8]);
-                                hasher.update(i.to_be_bytes());
-                            }
-                            Value::Float(f) => {
-                                hasher.update([0x02u8]);
-                                hasher.update(f.to_bits().to_be_bytes());
-                            }
-                            Value::Bool(b) => {
-                                hasher.update([0x03u8]);
-                                hasher.update([*b as u8]);
-                            }
-                            Value::Str(s) => {
-                                hasher.update([0x04u8]);
-                                let slen = s.len() as u64;
-                                hasher.update(slen.to_be_bytes());
-                                hasher.update(s.as_bytes());
-                            }
-                            Value::Ref(rid) => {
-                                hasher.update([0x05u8]);
-                                hasher.update(rid.to_be_bytes());
-                            }
-                            Value::List(vec) => {
-                                hasher.update([0x06u8]);
-                                let len = vec.len() as u64;
-                                hasher.update(len.to_be_bytes());
-                                for item in vec {
-                                    write_value(hasher, item);
-                                }
-                            }
-                            Value::Map(map) => {
-                                hasher.update([0x07u8]);
-                                // keys sorted
-                                let mut keys: Vec<&String> = map.keys().collect();
-                                keys.sort();
-                                let len = keys.len() as u64;
-                                hasher.update(len.to_be_bytes());
-                                for k in keys {
-                                    let v = map.get(k).unwrap();
-                                    let klen = k.len() as u64;
-                                    hasher.update(klen.to_be_bytes());
-                                    hasher.update(k.as_bytes());
-                                    write_value(hasher, v);
-                                }
-                            }
-                        }
-                    }
-
-                    write_value(&mut hasher, value);
+                    bytes.extend_from_slice(&klen.to_be_bytes());
+                    bytes.extend_from_slice(key.as_bytes());
+                    Self::write_value_canonical(&mut bytes, value);
                 }
             }
         }
 
-        let result = hasher.finalize();
+        let digest = Sha256::digest(bytes);
         let mut out = [0u8; 32];
-        out.copy_from_slice(&result[..32]);
+        out.copy_from_slice(&digest);
+        out
+    }
+
+    pub fn compute_state_hash(state: &HashMap<NodeId, Node>) -> [u8; 32] {
+        let mut bytes = Vec::new();
+        let mut node_ids: Vec<NodeId> = state.keys().copied().collect();
+        node_ids.sort_unstable();
+
+        for node_id in node_ids {
+            if let Some(node) = state.get(&node_id) {
+                bytes.extend_from_slice(&node_id.to_be_bytes());
+
+                let ty_len = node.ty.len() as u64;
+                bytes.extend_from_slice(&ty_len.to_be_bytes());
+                bytes.extend_from_slice(node.ty.as_bytes());
+
+                let mut field_keys: Vec<&String> = node.fields.keys().collect();
+                field_keys.sort();
+                let field_len = field_keys.len() as u64;
+                bytes.extend_from_slice(&field_len.to_be_bytes());
+                for field_key in field_keys {
+                    let key_len = field_key.len() as u64;
+                    bytes.extend_from_slice(&key_len.to_be_bytes());
+                    bytes.extend_from_slice(field_key.as_bytes());
+                    if let Some(field_value) = node.fields.get(field_key) {
+                        Self::write_value_canonical(&mut bytes, field_value);
+                    }
+                }
+            }
+        }
+
+        let digest = Sha256::digest(bytes);
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&digest);
         out
     }
 
@@ -131,13 +173,17 @@ impl Memory {
         let id = self.next_node_id;
         self.next_node_id += 1;
 
+        let node = Node {
+            id,
+            ty: ty.to_string(),
+            fields: HashMap::new(),
+        };
+        self.head_state.insert(id, node);
+
         let m = Mutation::CreateNode {
             id,
             ty: ty.to_string(),
         };
-        // apply immediately
-        self.apply_mutation(&m)
-            .expect("apply create should succeed");
         self.pending_mutations.push(m);
         id
     }
@@ -167,7 +213,6 @@ impl Memory {
         let commit_id = self.commits.len() as u64 + 1;
         let parent = self.commits.last().map(|c| c.id);
 
-        // validate parent
         if let Some(p) = parent {
             if p + 1 != commit_id {
                 return Err(MyosotisError::Invariant(format!(
@@ -181,10 +226,8 @@ impl Memory {
             ));
         }
 
-        // clone pending as commit mutations
         let mutations = self.pending_mutations.clone();
 
-        // Validate pending mutations against committed state (replay of existing commits)
         let mut base_state = Self::replay(&self.commits)?;
         for m in &mutations {
             match m {
@@ -195,7 +238,6 @@ impl Memory {
                             id
                         )));
                     }
-                    // simulate create
                     base_state.insert(
                         *id,
                         Node {
@@ -212,7 +254,7 @@ impl Memory {
                             id
                         )));
                     }
-                    // check references inside value
+
                     fn check_value(
                         v: &Value,
                         state: &HashMap<NodeId, Node>,
@@ -242,7 +284,6 @@ impl Memory {
                     }
 
                     check_value(value, &base_state)?;
-                    // simulate set
                     if let Some(node) = base_state.get_mut(id) {
                         node.fields.insert(key.clone(), value.clone());
                     }
@@ -250,7 +291,6 @@ impl Memory {
             }
         }
 
-        // compute parent_hash and commit hash
         let parent_hash = self.commits.last().map(|c| c.hash);
         let hash = Self::compute_commit_hash(parent_hash, &message, &mutations);
 
@@ -264,6 +304,23 @@ impl Memory {
         };
 
         self.commits.push(commit);
+
+        if self.commits.len().is_multiple_of(CHECKPOINT_INTERVAL) {
+            let last = self
+                .commits
+                .last()
+                .ok_or(MyosotisError::CorruptCommitChain(
+                    "missing last commit after push".to_string(),
+                ))?;
+            let state_hash = Self::compute_state_hash(&self.head_state);
+            self.checkpoints.push(Checkpoint {
+                commit_id: last.id,
+                commit_hash: last.hash,
+                state_hash,
+                state: self.head_state.clone(),
+            });
+        }
+
         self.pending_mutations.clear();
         Ok(())
     }
@@ -297,12 +354,14 @@ impl Memory {
     }
 
     pub fn replay(commits: &[Commit]) -> Result<HashMap<NodeId, Node>, MyosotisError> {
-        let mut state: HashMap<NodeId, Node> = HashMap::new();
+        Self::replay_from(HashMap::new(), commits)
+    }
 
+    pub fn replay_from(
+        mut state: HashMap<NodeId, Node>,
+        commits: &[Commit],
+    ) -> Result<HashMap<NodeId, Node>, MyosotisError> {
         for commit in commits {
-            // basic commit id/parent checks
-            // parent consistency is checked elsewhere (storage/load)
-
             for m in &commit.mutations {
                 match m {
                     Mutation::CreateNode { id, ty } => {
@@ -320,7 +379,6 @@ impl Memory {
                         state.insert(*id, node);
                     }
                     Mutation::SetField { id, key, value } => {
-                        // Ensure node exists at this time
                         if !state.contains_key(id) {
                             return Err(MyosotisError::Invariant(format!(
                                 "set before create {}",
@@ -328,7 +386,6 @@ impl Memory {
                             )));
                         }
 
-                        // Check references inside value point to existing node ids in state
                         fn check_value(
                             v: &Value,
                             state: &HashMap<NodeId, Node>,
@@ -371,8 +428,37 @@ impl Memory {
         Ok(state)
     }
 
+    pub fn state_at_commit(
+        &self,
+        target_commit_id: u64,
+    ) -> Result<HashMap<NodeId, Node>, MyosotisError> {
+        let target_index = self
+            .commits
+            .iter()
+            .position(|c| c.id == target_commit_id)
+            .ok_or(MyosotisError::CommitNotFound(target_commit_id))?;
+
+        let mut base_state: HashMap<NodeId, Node> = HashMap::new();
+        let mut start_index = 0usize;
+
+        if let Some(cp) = self
+            .checkpoints
+            .iter()
+            .filter(|c| c.commit_id <= target_commit_id)
+            .max_by_key(|c| c.commit_id)
+        {
+            base_state = cp.state.clone();
+            start_index = cp.commit_id as usize;
+        }
+
+        if start_index > target_index + 1 {
+            return Err(MyosotisError::InvalidCheckpoint);
+        }
+
+        Self::replay_from(base_state, &self.commits[start_index..=target_index])
+    }
+
     pub fn validate(&self) -> Result<(), MyosotisError> {
-        // Check commit ids and parent chain
         for (i, commit) in self.commits.iter().enumerate() {
             let expected_id = i as u64 + 1;
             if commit.id != expected_id {
@@ -388,6 +474,9 @@ impl Memory {
                         "first commit must have no parent".to_string(),
                     ));
                 }
+                if commit.parent_hash.is_some() {
+                    return Err(MyosotisError::ParentHashMismatch(commit.id));
+                }
             } else {
                 let prev_id = expected_id - 1;
                 if commit.parent != Some(prev_id) {
@@ -396,13 +485,46 @@ impl Memory {
                         commit.id, commit.parent, prev_id
                     )));
                 }
+
+                let prev_hash = self.commits.get(i - 1).map(|c| c.hash).ok_or(
+                    MyosotisError::CorruptCommitChain(
+                        "missing previous commit for parent hash".to_string(),
+                    ),
+                )?;
+                if commit.parent_hash != Some(prev_hash) {
+                    return Err(MyosotisError::ParentHashMismatch(commit.id));
+                }
+            }
+
+            let recomputed =
+                Self::compute_commit_hash(commit.parent_hash, &commit.message, &commit.mutations);
+            if commit.hash != recomputed {
+                return Err(MyosotisError::InvalidHash);
             }
         }
 
-        // Replay to ensure mutations valid
-        let state = Self::replay(&self.commits)?;
+        for checkpoint in &self.checkpoints {
+            let commit = self
+                .commits
+                .iter()
+                .find(|c| c.id == checkpoint.commit_id)
+                .ok_or(MyosotisError::CheckpointCommitMismatch)?;
+            if commit.hash != checkpoint.commit_hash {
+                return Err(MyosotisError::CheckpointCommitMismatch);
+            }
+            let recomputed_state_hash = Self::compute_state_hash(&checkpoint.state);
+            if recomputed_state_hash != checkpoint.state_hash {
+                return Err(MyosotisError::CheckpointHashMismatch);
+            }
+        }
 
-        // Ensure next_node_id is greater than any created id
+        let state = if let Some(cp) = self.checkpoints.iter().max_by_key(|c| c.commit_id) {
+            let start_index = cp.commit_id as usize;
+            Self::replay_from(cp.state.clone(), &self.commits[start_index..])?
+        } else {
+            Self::replay(&self.commits)?
+        };
+
         let max_id = state.keys().copied().max().unwrap_or(0);
         if self.next_node_id <= max_id {
             return Err(MyosotisError::Invariant(format!(
@@ -411,7 +533,6 @@ impl Memory {
             )));
         }
 
-        // head_state, if present, must match replayed state
         if !self.head_state.is_empty() && self.head_state != state {
             return Err(MyosotisError::Invariant(
                 "head_state does not match replayed state".to_string(),
