@@ -297,6 +297,10 @@ The engine remains language-agnostic.
 * Stable on-disk format
 * Crash-safe writes
 * Deterministic replay from file
+* Deterministic full-state checkpoints (derived cache layer)
+* Bounded replay cost by starting from nearest checkpoint
+* Checkpoints are integrity-verified on load
+* Commit log remains canonical source of truth
 
 History is never mutated.
 
