@@ -30,6 +30,15 @@ enum Commands {
         key: String,
         value: String,
     },
+    DeleteNode {
+        file: String,
+        id: u64,
+    },
+    DeleteField {
+        file: String,
+        id: u64,
+        key: String,
+    },
     Commit {
         file: String,
         message: String,
@@ -104,6 +113,18 @@ fn main() -> Result<()> {
                 message
             );
         }
+        Commands::DeleteNode { file, id } => {
+            let mut mem = storage::load(&file)?;
+            mem.delete_node(id)?;
+            storage::save(&file, &mem)?;
+            println!("Staged delete-node for node {}", id);
+        }
+        Commands::DeleteField { file, id, key } => {
+            let mut mem = storage::load(&file)?;
+            mem.delete_field(id, &key)?;
+            storage::save(&file, &mem)?;
+            println!("Staged delete-field '{}' on node {}", key, id);
+        }
         Commands::Show { file, id, at } => {
             let mem = storage::load(&file)?;
 
@@ -115,6 +136,9 @@ fn main() -> Result<()> {
                 let node = state
                     .get(&id)
                     .ok_or_else(|| anyhow::anyhow!(MyosotisError::NodeNotFound(id)))?;
+                if node.deleted {
+                    return Err(anyhow::anyhow!(MyosotisError::NodeDeleted(id)));
+                }
 
                 println!("Node {} @ commit {}:", id, commit_id);
                 println!("  type: {}", node.ty);
@@ -129,6 +153,9 @@ fn main() -> Result<()> {
                     .head_state
                     .get(&id)
                     .ok_or_else(|| anyhow::anyhow!(MyosotisError::NodeNotFound(id)))?;
+                if node.deleted {
+                    return Err(anyhow::anyhow!(MyosotisError::NodeDeleted(id)));
+                }
 
                 println!("Node {} (current):", id);
                 println!("  type: {}", node.ty);

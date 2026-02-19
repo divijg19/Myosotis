@@ -19,4 +19,5 @@ pub struct Node {
     pub id: NodeId,
     pub ty: String,
     pub fields: HashMap<String, Value>,
+    pub deleted: bool,
 }

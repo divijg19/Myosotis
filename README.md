@@ -188,6 +188,13 @@ Each node contains:
 * `NodeId` (u64)
 * `Type` (string)
 * `Fields` (map of string → value)
+* `deleted` tombstone flag (soft-delete marker)
+
+Deletion model:
+
+* Nodes are never physically removed from state
+* NodeId is never reused, even after deletion
+* No cascading delete is performed
 
 ## 6.2 Values
 
@@ -301,6 +308,7 @@ The engine remains language-agnostic.
 * Bounded replay cost by starting from nearest checkpoint
 * Checkpoints are integrity-verified on load
 * Commit log remains canonical source of truth
+* Tombstones are persisted and included in deterministic state hashing
 
 History is never mutated.
 
