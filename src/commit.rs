@@ -12,6 +12,13 @@ pub enum Mutation {
         key: String,
         value: Value,
     },
+    DeleteField {
+        id: NodeId,
+        key: String,
+    },
+    DeleteNode {
+        id: NodeId,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

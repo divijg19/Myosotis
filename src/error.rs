@@ -36,4 +36,16 @@ pub enum MyosotisError {
 
     #[error("Checkpoint commit mismatch")]
     CheckpointCommitMismatch,
+
+    #[error("Node is deleted: {0}")]
+    NodeDeleted(u64),
+
+    #[error("Field not found: {0}")]
+    FieldNotFound(String),
+
+    #[error("Delete on already deleted node: {0}")]
+    DeleteOnDeletedNode(u64),
+
+    #[error("Delete on non-existent node: {0}")]
+    DeleteNonexistentNode(u64),
 }

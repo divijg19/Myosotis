@@ -126,6 +126,17 @@ impl Memory {
                     bytes.extend_from_slice(key.as_bytes());
                     Self::write_value_canonical(&mut bytes, value);
                 }
+                Mutation::DeleteField { id, key } => {
+                    bytes.push(0x03);
+                    bytes.extend_from_slice(&id.to_be_bytes());
+                    let klen = key.len() as u64;
+                    bytes.extend_from_slice(&klen.to_be_bytes());
+                    bytes.extend_from_slice(key.as_bytes());
+                }
+                Mutation::DeleteNode { id } => {
+                    bytes.push(0x04);
+                    bytes.extend_from_slice(&id.to_be_bytes());
+                }
             }
         }
 
@@ -147,6 +158,8 @@ impl Memory {
                 let ty_len = node.ty.len() as u64;
                 bytes.extend_from_slice(&ty_len.to_be_bytes());
                 bytes.extend_from_slice(node.ty.as_bytes());
+
+                bytes.push(if node.deleted { 1 } else { 0 });
 
                 let mut field_keys: Vec<&String> = node.fields.keys().collect();
                 field_keys.sort();
@@ -177,6 +190,7 @@ impl Memory {
             id,
             ty: ty.to_string(),
             fields: HashMap::new(),
+            deleted: false,
         };
         self.head_state.insert(id, node);
 
@@ -189,8 +203,12 @@ impl Memory {
     }
 
     pub fn set(&mut self, id: NodeId, key: &str, value: Value) -> Result<(), MyosotisError> {
-        if !self.head_state.contains_key(&id) {
-            return Err(MyosotisError::NodeNotFound(id));
+        let node = self
+            .head_state
+            .get(&id)
+            .ok_or(MyosotisError::NodeNotFound(id))?;
+        if node.deleted {
+            return Err(MyosotisError::NodeDeleted(id));
         }
 
         let m = Mutation::SetField {
@@ -198,6 +216,42 @@ impl Memory {
             key: key.to_string(),
             value,
         };
+        self.apply_mutation(&m)?;
+        self.pending_mutations.push(m);
+        Ok(())
+    }
+
+    pub fn delete_field(&mut self, id: NodeId, key: &str) -> Result<(), MyosotisError> {
+        let node = self
+            .head_state
+            .get(&id)
+            .ok_or(MyosotisError::DeleteNonexistentNode(id))?;
+        if node.deleted {
+            return Err(MyosotisError::DeleteOnDeletedNode(id));
+        }
+        if !node.fields.contains_key(key) {
+            return Err(MyosotisError::FieldNotFound(key.to_string()));
+        }
+
+        let m = Mutation::DeleteField {
+            id,
+            key: key.to_string(),
+        };
+        self.apply_mutation(&m)?;
+        self.pending_mutations.push(m);
+        Ok(())
+    }
+
+    pub fn delete_node(&mut self, id: NodeId) -> Result<(), MyosotisError> {
+        let node = self
+            .head_state
+            .get(&id)
+            .ok_or(MyosotisError::DeleteNonexistentNode(id))?;
+        if node.deleted {
+            return Err(MyosotisError::DeleteOnDeletedNode(id));
+        }
+
+        let m = Mutation::DeleteNode { id };
         self.apply_mutation(&m)?;
         self.pending_mutations.push(m);
         Ok(())
@@ -244,15 +298,17 @@ impl Memory {
                             id: *id,
                             ty: String::new(),
                             fields: HashMap::new(),
+                            deleted: false,
                         },
                     );
                 }
                 Mutation::SetField { id, key, value } => {
-                    if !base_state.contains_key(id) {
-                        return Err(MyosotisError::Invariant(format!(
-                            "set on missing node {}",
-                            id
-                        )));
+                    let existing = base_state.get(id).ok_or(MyosotisError::Invariant(format!(
+                        "set on missing node {}",
+                        id
+                    )))?;
+                    if existing.deleted {
+                        return Err(MyosotisError::NodeDeleted(*id));
                     }
 
                     fn check_value(
@@ -287,6 +343,26 @@ impl Memory {
                     if let Some(node) = base_state.get_mut(id) {
                         node.fields.insert(key.clone(), value.clone());
                     }
+                }
+                Mutation::DeleteField { id, key } => {
+                    let existing = base_state
+                        .get_mut(id)
+                        .ok_or(MyosotisError::DeleteNonexistentNode(*id))?;
+                    if existing.deleted {
+                        return Err(MyosotisError::DeleteOnDeletedNode(*id));
+                    }
+                    if existing.fields.remove(key).is_none() {
+                        return Err(MyosotisError::FieldNotFound(key.clone()));
+                    }
+                }
+                Mutation::DeleteNode { id } => {
+                    let existing = base_state
+                        .get_mut(id)
+                        .ok_or(MyosotisError::DeleteNonexistentNode(*id))?;
+                    if existing.deleted {
+                        return Err(MyosotisError::DeleteOnDeletedNode(*id));
+                    }
+                    existing.deleted = true;
                 }
             }
         }
@@ -338,6 +414,7 @@ impl Memory {
                     id: *id,
                     ty: ty.clone(),
                     fields: HashMap::new(),
+                    deleted: false,
                 };
                 self.head_state.insert(*id, node);
                 Ok(())
@@ -347,7 +424,34 @@ impl Memory {
                     .head_state
                     .get_mut(id)
                     .ok_or(MyosotisError::NodeNotFound(*id))?;
+                if node.deleted {
+                    return Err(MyosotisError::NodeDeleted(*id));
+                }
                 node.fields.insert(key.clone(), value.clone());
+                Ok(())
+            }
+            Mutation::DeleteField { id, key } => {
+                let node = self
+                    .head_state
+                    .get_mut(id)
+                    .ok_or(MyosotisError::DeleteNonexistentNode(*id))?;
+                if node.deleted {
+                    return Err(MyosotisError::DeleteOnDeletedNode(*id));
+                }
+                if node.fields.remove(key).is_none() {
+                    return Err(MyosotisError::FieldNotFound(key.clone()));
+                }
+                Ok(())
+            }
+            Mutation::DeleteNode { id } => {
+                let node = self
+                    .head_state
+                    .get_mut(id)
+                    .ok_or(MyosotisError::DeleteNonexistentNode(*id))?;
+                if node.deleted {
+                    return Err(MyosotisError::DeleteOnDeletedNode(*id));
+                }
+                node.deleted = true;
                 Ok(())
             }
         }
@@ -375,15 +479,17 @@ impl Memory {
                             id: *id,
                             ty: ty.clone(),
                             fields: HashMap::new(),
+                            deleted: false,
                         };
                         state.insert(*id, node);
                     }
                     Mutation::SetField { id, key, value } => {
-                        if !state.contains_key(id) {
-                            return Err(MyosotisError::Invariant(format!(
-                                "set before create {}",
-                                id
-                            )));
+                        let existing = state.get(id).ok_or(MyosotisError::Invariant(format!(
+                            "set before create {}",
+                            id
+                        )))?;
+                        if existing.deleted {
+                            return Err(MyosotisError::NodeDeleted(*id));
                         }
 
                         fn check_value(
@@ -420,6 +526,26 @@ impl Memory {
                             id
                         )))?;
                         node.fields.insert(key.clone(), value.clone());
+                    }
+                    Mutation::DeleteField { id, key } => {
+                        let node = state
+                            .get_mut(id)
+                            .ok_or(MyosotisError::DeleteNonexistentNode(*id))?;
+                        if node.deleted {
+                            return Err(MyosotisError::DeleteOnDeletedNode(*id));
+                        }
+                        if node.fields.remove(key).is_none() {
+                            return Err(MyosotisError::FieldNotFound(key.clone()));
+                        }
+                    }
+                    Mutation::DeleteNode { id } => {
+                        let node = state
+                            .get_mut(id)
+                            .ok_or(MyosotisError::DeleteNonexistentNode(*id))?;
+                        if node.deleted {
+                            return Err(MyosotisError::DeleteOnDeletedNode(*id));
+                        }
+                        node.deleted = true;
                     }
                 }
             }
