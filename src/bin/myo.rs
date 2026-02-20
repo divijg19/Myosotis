@@ -39,6 +39,11 @@ enum Commands {
         id: u64,
         key: String,
     },
+    Compact {
+        file: String,
+        #[arg(long)]
+        at: Option<u64>,
+    },
     Commit {
         file: String,
         message: String,
@@ -124,6 +129,10 @@ fn main() -> Result<()> {
             mem.delete_field(id, &key)?;
             storage::save(&file, &mem)?;
             println!("Staged delete-field '{}' on node {}", key, id);
+        }
+        Commands::Compact { file, at } => {
+            storage::compact(&file, at)?;
+            println!("Compacted log in {}", file);
         }
         Commands::Show { file, id, at } => {
             let mem = storage::load(&file)?;
