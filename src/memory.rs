@@ -17,6 +17,8 @@ pub struct Checkpoint {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Memory {
+    pub genesis_state: Option<HashMap<NodeId, Node>>,
+    pub genesis_state_hash: Option<[u8; 32]>,
     pub commits: Vec<Commit>,
     pub checkpoints: Vec<Checkpoint>,
     pub next_node_id: NodeId,
@@ -31,6 +33,8 @@ pub struct Memory {
 impl Memory {
     pub fn new() -> Self {
         Self {
+            genesis_state: None,
+            genesis_state_hash: None,
             commits: Vec::new(),
             checkpoints: Vec::new(),
             next_node_id: 1,
@@ -264,7 +268,7 @@ impl Memory {
             ));
         }
 
-        let commit_id = self.commits.len() as u64 + 1;
+        let commit_id = self.commits.last().map(|c| c.id + 1).unwrap_or(1);
         let parent = self.commits.last().map(|c| c.id);
 
         if let Some(p) = parent {
@@ -367,7 +371,11 @@ impl Memory {
             }
         }
 
-        let parent_hash = self.commits.last().map(|c| c.hash);
+        let parent_hash = if let Some(last) = self.commits.last() {
+            Some(last.hash)
+        } else {
+            self.genesis_state_hash
+        };
         let hash = Self::compute_commit_hash(parent_hash, &message, &mutations);
 
         let commit = Commit {
@@ -564,7 +572,7 @@ impl Memory {
             .position(|c| c.id == target_commit_id)
             .ok_or(MyosotisError::CommitNotFound(target_commit_id))?;
 
-        let mut base_state: HashMap<NodeId, Node> = HashMap::new();
+        let mut base_state: HashMap<NodeId, Node> = self.genesis_state.clone().unwrap_or_default();
         let mut start_index = 0usize;
 
         if let Some(cp) = self
@@ -574,7 +582,11 @@ impl Memory {
             .max_by_key(|c| c.commit_id)
         {
             base_state = cp.state.clone();
-            start_index = cp.commit_id as usize;
+            if let Some(pos) = self.commits.iter().position(|c| c.id == cp.commit_id) {
+                start_index = pos + 1;
+            } else {
+                return Err(MyosotisError::InvalidCheckpoint);
+            }
         }
 
         if start_index > target_index + 1 {
@@ -585,13 +597,24 @@ impl Memory {
     }
 
     pub fn validate(&self) -> Result<(), MyosotisError> {
+        if let Some(genesis_state) = &self.genesis_state {
+            let expected_hash = Self::compute_state_hash(genesis_state);
+            if self.genesis_state_hash != Some(expected_hash) {
+                return Err(MyosotisError::CompactionIntegrityMismatch);
+            }
+        } else if self.genesis_state_hash.is_some() {
+            return Err(MyosotisError::CompactionIntegrityMismatch);
+        }
+
         for (i, commit) in self.commits.iter().enumerate() {
-            let expected_id = i as u64 + 1;
-            if commit.id != expected_id {
-                return Err(MyosotisError::Invariant(format!(
-                    "commit id {} at index {} expected {}",
-                    commit.id, i, expected_id
-                )));
+            if i > 0 {
+                let prev_id = self.commits[i - 1].id;
+                if commit.id != prev_id + 1 {
+                    return Err(MyosotisError::Invariant(format!(
+                        "commit id {} is not sequential after {}",
+                        commit.id, prev_id
+                    )));
+                }
             }
 
             if i == 0 {
@@ -600,11 +623,11 @@ impl Memory {
                         "first commit must have no parent".to_string(),
                     ));
                 }
-                if commit.parent_hash.is_some() {
+                if commit.parent_hash != self.genesis_state_hash {
                     return Err(MyosotisError::ParentHashMismatch(commit.id));
                 }
             } else {
-                let prev_id = expected_id - 1;
+                let prev_id = self.commits[i - 1].id;
                 if commit.parent != Some(prev_id) {
                     return Err(MyosotisError::Invariant(format!(
                         "commit {} has invalid parent {:?}, expected {}",
@@ -645,10 +668,18 @@ impl Memory {
         }
 
         let state = if let Some(cp) = self.checkpoints.iter().max_by_key(|c| c.commit_id) {
-            let start_index = cp.commit_id as usize;
+            let start_index = self
+                .commits
+                .iter()
+                .position(|c| c.id == cp.commit_id)
+                .ok_or(MyosotisError::InvalidCheckpoint)?
+                + 1;
             Self::replay_from(cp.state.clone(), &self.commits[start_index..])?
         } else {
-            Self::replay(&self.commits)?
+            Self::replay_from(
+                self.genesis_state.clone().unwrap_or_default(),
+                &self.commits,
+            )?
         };
 
         let max_id = state.keys().copied().max().unwrap_or(0);

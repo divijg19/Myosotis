@@ -48,4 +48,10 @@ pub enum MyosotisError {
 
     #[error("Delete on non-existent node: {0}")]
     DeleteNonexistentNode(u64),
+
+    #[error("Invalid compaction target")]
+    InvalidCompactionTarget,
+
+    #[error("Compaction integrity mismatch")]
+    CompactionIntegrityMismatch,
 }

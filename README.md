@@ -309,6 +309,14 @@ The engine remains language-agnostic.
 * Checkpoints are integrity-verified on load
 * Commit log remains canonical source of truth
 * Tombstones are persisted and included in deterministic state hashing
+* Deterministic prefix compaction via genesis snapshots
+
+Compaction notes:
+
+* Compaction rewrites historical prefix into a canonical genesis snapshot
+* Observable latest state is preserved exactly
+* Tombstoned nodes are preserved (no tombstone pruning)
+* Commit log after compaction remains hash-chain verified
 
 History is never mutated.
 
