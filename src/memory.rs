@@ -596,14 +596,14 @@ impl Memory {
         Self::replay_from(base_state, &self.commits[start_index..=target_index])
     }
 
-    pub fn validate(&self) -> Result<(), MyosotisError> {
+    pub fn validate_with_mode(&self, verify_hashes: bool) -> Result<(), MyosotisError> {
         if let Some(genesis_state) = &self.genesis_state {
             let expected_hash = Self::compute_state_hash(genesis_state);
             if self.genesis_state_hash != Some(expected_hash) {
-                return Err(MyosotisError::CompactionIntegrityMismatch);
+                return Err(MyosotisError::CorruptGenesisHash);
             }
         } else if self.genesis_state_hash.is_some() {
-            return Err(MyosotisError::CompactionIntegrityMismatch);
+            return Err(MyosotisError::CorruptGenesisHash);
         }
 
         for (i, commit) in self.commits.iter().enumerate() {
@@ -624,7 +624,7 @@ impl Memory {
                     ));
                 }
                 if commit.parent_hash != self.genesis_state_hash {
-                    return Err(MyosotisError::ParentHashMismatch(commit.id));
+                    return Err(MyosotisError::CorruptParentHash);
                 }
             } else {
                 let prev_id = self.commits[i - 1].id;
@@ -641,14 +641,19 @@ impl Memory {
                     ),
                 )?;
                 if commit.parent_hash != Some(prev_hash) {
-                    return Err(MyosotisError::ParentHashMismatch(commit.id));
+                    return Err(MyosotisError::CorruptParentHash);
                 }
             }
 
-            let recomputed =
-                Self::compute_commit_hash(commit.parent_hash, &commit.message, &commit.mutations);
-            if commit.hash != recomputed {
-                return Err(MyosotisError::InvalidHash);
+            if verify_hashes {
+                let recomputed = Self::compute_commit_hash(
+                    commit.parent_hash,
+                    &commit.message,
+                    &commit.mutations,
+                );
+                if commit.hash != recomputed {
+                    return Err(MyosotisError::CorruptCommitHash);
+                }
             }
         }
 
@@ -661,9 +666,11 @@ impl Memory {
             if commit.hash != checkpoint.commit_hash {
                 return Err(MyosotisError::CheckpointCommitMismatch);
             }
-            let recomputed_state_hash = Self::compute_state_hash(&checkpoint.state);
-            if recomputed_state_hash != checkpoint.state_hash {
-                return Err(MyosotisError::CheckpointHashMismatch);
+            if verify_hashes {
+                let recomputed_state_hash = Self::compute_state_hash(&checkpoint.state);
+                if recomputed_state_hash != checkpoint.state_hash {
+                    return Err(MyosotisError::CorruptCheckpointHash);
+                }
             }
         }
 
@@ -697,6 +704,10 @@ impl Memory {
         }
 
         Ok(())
+    }
+
+    pub fn validate(&self) -> Result<(), MyosotisError> {
+        self.validate_with_mode(true)
     }
 }
 

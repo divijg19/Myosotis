@@ -318,6 +318,41 @@ Compaction notes:
 * Tombstoned nodes are preserved (no tombstone pruning)
 * Commit log after compaction remains hash-chain verified
 
+---
+
+# File Format Specification (v1)
+
+Top-level file header fields:
+
+* `magic`: must be `"MYOSOTIS"`
+* `format_version`: must be `1`
+
+Top-level schema fields:
+
+* `magic`
+* `format_version`
+* `genesis_state` (optional)
+* `genesis_state_hash` (optional)
+* `commits`
+* `checkpoints`
+* `next_node_id`
+
+Compatibility policy:
+
+* `format_version` increments only for breaking storage changes.
+* Files with `format_version` greater than supported are refused.
+* v0.5.0 legacy files (without header) are loaded and migrated on next write.
+* Header migration does not alter commit/state semantics or hash algorithms.
+
+Forward-compat guardrail:
+
+* Unknown future format versions are explicitly rejected.
+
+Serialization discipline:
+
+* All writes include `magic` and `format_version`.
+* Field ordering is emitted deterministically from the serializer-backed struct layout.
+
 History is never mutated.
 
 ---

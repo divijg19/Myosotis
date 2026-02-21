@@ -54,4 +54,28 @@ pub enum MyosotisError {
 
     #[error("Compaction integrity mismatch")]
     CompactionIntegrityMismatch,
+
+    #[error("Invalid file magic")]
+    InvalidFileMagic,
+
+    #[error("Unsupported format version: {0}")]
+    UnsupportedFormatVersion(u32),
+
+    #[error("Missing format version")]
+    MissingFormatVersion,
+
+    #[error("Corrupt commit hash")]
+    CorruptCommitHash,
+
+    #[error("Corrupt parent hash")]
+    CorruptParentHash,
+
+    #[error("Corrupt checkpoint hash")]
+    CorruptCheckpointHash,
+
+    #[error("Corrupt genesis hash")]
+    CorruptGenesisHash,
+
+    #[error("Malformed file structure")]
+    MalformedFileStructure,
 }
