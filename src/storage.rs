@@ -2,49 +2,68 @@ use crate::error::MyosotisError;
 use crate::memory::Memory;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
+pub const FILE_MAGIC: &str = "MYOSOTIS";
+pub const FORMAT_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Copy)]
+pub enum LoadMode {
+    Strict,
+    Unsafe,
+}
+
 #[derive(Serialize, Deserialize)]
-struct StorageFormat {
-    genesis_state: Option<std::collections::HashMap<crate::node::NodeId, crate::node::Node>>,
+#[serde(deny_unknown_fields)]
+struct StorageFormatV1 {
+    magic: String,
+    format_version: u32,
+    genesis_state: Option<HashMap<crate::node::NodeId, crate::node::Node>>,
     genesis_state_hash: Option<[u8; 32]>,
     commits: Vec<crate::commit::Commit>,
     checkpoints: Vec<crate::memory::Checkpoint>,
     next_node_id: crate::node::NodeId,
 }
 
-pub fn save(path: &str, memory: &Memory) -> Result<()> {
-    let sf = StorageFormat {
-        genesis_state: memory.genesis_state.clone(),
-        genesis_state_hash: memory.genesis_state_hash,
-        commits: memory.commits.clone(),
-        checkpoints: memory.checkpoints.clone(),
-        next_node_id: memory.next_node_id,
-    };
-
-    let data = serde_json::to_string_pretty(&sf)?;
-    fs::write(path, data).with_context(|| format!("Failed to write to file: {}", path))?;
-    Ok(())
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyStorageFormatV05 {
+    genesis_state: Option<HashMap<crate::node::NodeId, crate::node::Node>>,
+    genesis_state_hash: Option<[u8; 32]>,
+    commits: Vec<crate::commit::Commit>,
+    checkpoints: Vec<crate::memory::Checkpoint>,
+    next_node_id: crate::node::NodeId,
 }
 
-pub fn load(path: &str) -> Result<Memory> {
-    let data =
-        fs::read_to_string(path).with_context(|| format!("Failed to read file: {}", path))?;
-    let sf: StorageFormat = serde_json::from_str(&data)?;
-
-    // Build memory from storage format and replay to construct head_state
+fn to_memory(sf: StorageFormatV1) -> Memory {
     let mut mem = Memory::new();
     mem.genesis_state = sf.genesis_state;
     mem.genesis_state_hash = sf.genesis_state_hash;
     mem.commits = sf.commits;
     mem.checkpoints = sf.checkpoints;
     mem.next_node_id = sf.next_node_id;
+    mem
+}
 
-    // Validate commit chain + checkpoint integrity
-    mem.validate().map_err(|e| anyhow::anyhow!(e.to_string()))?;
+fn from_memory(memory: &Memory) -> StorageFormatV1 {
+    StorageFormatV1 {
+        magic: FILE_MAGIC.to_string(),
+        format_version: FORMAT_VERSION,
+        genesis_state: memory.genesis_state.clone(),
+        genesis_state_hash: memory.genesis_state_hash,
+        commits: memory.commits.clone(),
+        checkpoints: memory.checkpoints.clone(),
+        next_node_id: memory.next_node_id,
+    }
+}
 
-    // Reconstruct head_state from latest valid checkpoint then replay remaining commits.
+fn validate_and_build_head(mut mem: Memory, mode: LoadMode) -> Result<Memory> {
+    let verify_hashes = matches!(mode, LoadMode::Strict);
+    mem.validate_with_mode(verify_hashes)
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
     let state = if let Some(cp) = mem.checkpoints.iter().max_by_key(|c| c.commit_id) {
         let start_index = mem
             .commits
@@ -58,10 +77,87 @@ pub fn load(path: &str) -> Result<Memory> {
         Memory::replay_from(mem.genesis_state.clone().unwrap_or_default(), &mem.commits)
             .map_err(|e| anyhow::anyhow!(e.to_string()))?
     };
+
     mem.head_state = state;
     mem.pending_mutations = Vec::new();
-
     Ok(mem)
+}
+
+pub fn save(path: &str, memory: &Memory) -> Result<()> {
+    let sf = from_memory(memory);
+    let data = serde_json::to_string_pretty(&sf)?;
+    fs::write(path, data).with_context(|| format!("Failed to write to file: {}", path))?;
+    Ok(())
+}
+
+pub fn load_with_mode(path: &str, mode: LoadMode) -> Result<Memory> {
+    let data =
+        fs::read_to_string(path).with_context(|| format!("Failed to read file: {}", path))?;
+
+    let root: serde_json::Value =
+        serde_json::from_str(&data).map_err(|_| anyhow::anyhow!(MyosotisError::MalformedFileStructure))?;
+
+    let obj = root
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!(MyosotisError::MalformedFileStructure))?;
+
+    let has_magic = obj.contains_key("magic");
+    let has_version = obj.contains_key("format_version");
+
+    if has_magic && !has_version {
+        return Err(anyhow::anyhow!(MyosotisError::MissingFormatVersion));
+    }
+
+    if has_version {
+        let version = obj
+            .get("format_version")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| anyhow::anyhow!(MyosotisError::MissingFormatVersion))? as u32;
+
+        if version == 0 {
+            return Err(anyhow::anyhow!(MyosotisError::MissingFormatVersion));
+        }
+        if version > FORMAT_VERSION {
+            return Err(anyhow::anyhow!(MyosotisError::UnsupportedFormatVersion(version)));
+        }
+
+        let magic = obj
+            .get("magic")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!(MyosotisError::InvalidFileMagic))?;
+        if magic != FILE_MAGIC {
+            return Err(anyhow::anyhow!(MyosotisError::InvalidFileMagic));
+        }
+
+        let sf: StorageFormatV1 = serde_json::from_value(root)
+            .map_err(|_| anyhow::anyhow!(MyosotisError::MalformedFileStructure))?;
+        let mem = to_memory(sf);
+        return validate_and_build_head(mem, mode);
+    }
+
+    // Legacy v0.5.0 path: no magic + no format_version
+    if has_magic {
+        return Err(anyhow::anyhow!(MyosotisError::InvalidFileMagic));
+    }
+
+    let legacy: LegacyStorageFormatV05 =
+        serde_json::from_str(&data).map_err(|_| anyhow::anyhow!(MyosotisError::MalformedFileStructure))?;
+    let sf = StorageFormatV1 {
+        magic: FILE_MAGIC.to_string(),
+        format_version: FORMAT_VERSION,
+        genesis_state: legacy.genesis_state,
+        genesis_state_hash: legacy.genesis_state_hash,
+        commits: legacy.commits,
+        checkpoints: legacy.checkpoints,
+        next_node_id: legacy.next_node_id,
+    };
+
+    let mem = to_memory(sf);
+    validate_and_build_head(mem, mode)
+}
+
+pub fn load(path: &str) -> Result<Memory> {
+    load_with_mode(path, LoadMode::Strict)
 }
 
 pub fn exists(path: &str) -> bool {
@@ -101,8 +197,7 @@ pub fn compact(path: &str, at: Option<u64>) -> Result<()> {
     for commit in &mut mem.commits {
         commit.parent = prev_id;
         commit.parent_hash = prev_hash;
-        commit.hash =
-            Memory::compute_commit_hash(commit.parent_hash, &commit.message, &commit.mutations);
+        commit.hash = Memory::compute_commit_hash(commit.parent_hash, &commit.message, &commit.mutations);
         prev_hash = Some(commit.hash);
         prev_id = Some(commit.id);
     }
