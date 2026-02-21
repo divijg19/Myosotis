@@ -1,5 +1,6 @@
 pub mod commit;
 pub mod error;
+pub mod maintenance;
 pub mod memory;
 pub mod node;
 pub mod storage;

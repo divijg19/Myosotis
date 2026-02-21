@@ -5,7 +5,18 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
+type Hash = [u8; 32];
+type State = HashMap<NodeId, Node>;
+
 pub const CHECKPOINT_INTERVAL: usize = 50;
+
+#[derive(Debug, Clone)]
+struct Snapshot {
+    state: State,
+    state_hash: Hash,
+    commit_id: Option<u64>,
+    commit_hash: Option<Hash>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Checkpoint {
@@ -186,32 +197,186 @@ impl Memory {
         out
     }
 
+    fn check_value_refs(value: &Value, state: &State) -> Result<(), MyosotisError> {
+        match value {
+            Value::Ref(rid) => {
+                if !state.contains_key(rid) {
+                    return Err(MyosotisError::Invariant(format!(
+                        "reference to missing node {}",
+                        rid
+                    )));
+                }
+            }
+            Value::List(vec) => {
+                for item in vec {
+                    Self::check_value_refs(item, state)?;
+                }
+            }
+            Value::Map(map) => {
+                for item in map.values() {
+                    Self::check_value_refs(item, state)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn apply_mutation(state: &mut State, mutation: &Mutation) -> Result<(), MyosotisError> {
+        match mutation {
+            Mutation::CreateNode { id, ty } => {
+                if state.contains_key(id) {
+                    return Err(MyosotisError::Invariant(format!(
+                        "duplicate create node {}",
+                        id
+                    )));
+                }
+                state.insert(
+                    *id,
+                    Node {
+                        id: *id,
+                        ty: ty.clone(),
+                        fields: HashMap::new(),
+                        deleted: false,
+                    },
+                );
+                Ok(())
+            }
+            Mutation::SetField { id, key, value } => {
+                let existing = state.get(id).ok_or(MyosotisError::Invariant(format!(
+                    "set before create {}",
+                    id
+                )))?;
+                if existing.deleted {
+                    return Err(MyosotisError::NodeDeleted(*id));
+                }
+                Self::check_value_refs(value, state)?;
+                let node = state.get_mut(id).ok_or(MyosotisError::Invariant(format!(
+                    "set before create {}",
+                    id
+                )))?;
+                node.fields.insert(key.clone(), value.clone());
+                Ok(())
+            }
+            Mutation::DeleteField { id, key } => {
+                let node = state
+                    .get_mut(id)
+                    .ok_or(MyosotisError::DeleteNonexistentNode(*id))?;
+                if node.deleted {
+                    return Err(MyosotisError::DeleteOnDeletedNode(*id));
+                }
+                if node.fields.remove(key).is_none() {
+                    return Err(MyosotisError::FieldNotFound(key.clone()));
+                }
+                Ok(())
+            }
+            Mutation::DeleteNode { id } => {
+                let node = state
+                    .get_mut(id)
+                    .ok_or(MyosotisError::DeleteNonexistentNode(*id))?;
+                if node.deleted {
+                    return Err(MyosotisError::DeleteOnDeletedNode(*id));
+                }
+                node.deleted = true;
+                Ok(())
+            }
+        }
+    }
+
+    fn snapshot_from_genesis(&self) -> Option<Snapshot> {
+        self.genesis_state.as_ref().map(|state| Snapshot {
+            state: state.clone(),
+            state_hash: self
+                .genesis_state_hash
+                .unwrap_or_else(|| Self::compute_state_hash(state)),
+            commit_id: None,
+            commit_hash: None,
+        })
+    }
+
+    fn snapshot_from_checkpoint(cp: &Checkpoint) -> Snapshot {
+        Snapshot {
+            state: cp.state.clone(),
+            state_hash: cp.state_hash,
+            commit_id: Some(cp.commit_id),
+            commit_hash: Some(cp.commit_hash),
+        }
+    }
+
+    fn latest_snapshot_for_head(&self) -> Option<Snapshot> {
+        if let Some(cp) = self.checkpoints.iter().max_by_key(|c| c.commit_id) {
+            Some(Self::snapshot_from_checkpoint(cp))
+        } else {
+            self.snapshot_from_genesis()
+        }
+    }
+
+    fn snapshot_for_commit(&self, commit_id: u64) -> Option<Snapshot> {
+        if let Some(cp) = self
+            .checkpoints
+            .iter()
+            .filter(|c| c.commit_id <= commit_id)
+            .max_by_key(|c| c.commit_id)
+        {
+            Some(Self::snapshot_from_checkpoint(cp))
+        } else {
+            self.snapshot_from_genesis()
+        }
+    }
+
+    fn replay_from_snapshot(
+        snapshot: Option<&Snapshot>,
+        commits: &[Commit],
+    ) -> Result<State, MyosotisError> {
+        let mut state = snapshot
+            .map(|s| {
+                let _ = (s.state_hash, s.commit_hash);
+                s.state.clone()
+            })
+            .unwrap_or_default();
+        for commit in commits {
+            for mutation in &commit.mutations {
+                Self::apply_mutation(&mut state, mutation)?;
+            }
+        }
+        Ok(state)
+    }
+
+    fn commits_start_index_from_snapshot(
+        &self,
+        snapshot: Option<&Snapshot>,
+    ) -> Result<usize, MyosotisError> {
+        if let Some(s) = snapshot
+            && let Some(cid) = s.commit_id
+        {
+            let pos = self
+                .commits
+                .iter()
+                .position(|c| c.id == cid)
+                .ok_or(MyosotisError::InvalidCheckpoint)?;
+            return Ok(pos + 1);
+        }
+        Ok(0)
+    }
+
     pub fn create(&mut self, ty: &str) -> NodeId {
         let id = self.next_node_id;
         self.next_node_id += 1;
-
-        let node = Node {
-            id,
-            ty: ty.to_string(),
-            fields: HashMap::new(),
-            deleted: false,
-        };
-        self.head_state.insert(id, node);
 
         let m = Mutation::CreateNode {
             id,
             ty: ty.to_string(),
         };
+        let _ = Self::apply_mutation(&mut self.head_state, &m);
         self.pending_mutations.push(m);
         id
     }
 
     pub fn set(&mut self, id: NodeId, key: &str, value: Value) -> Result<(), MyosotisError> {
-        let node = self
-            .head_state
-            .get(&id)
-            .ok_or(MyosotisError::NodeNotFound(id))?;
-        if node.deleted {
+        if !self.head_state.contains_key(&id) {
+            return Err(MyosotisError::NodeNotFound(id));
+        }
+        if self.head_state.get(&id).map(|n| n.deleted).unwrap_or(false) {
             return Err(MyosotisError::NodeDeleted(id));
         }
 
@@ -220,7 +385,7 @@ impl Memory {
             key: key.to_string(),
             value,
         };
-        self.apply_mutation(&m)?;
+        Self::apply_mutation(&mut self.head_state, &m)?;
         self.pending_mutations.push(m);
         Ok(())
     }
@@ -241,7 +406,7 @@ impl Memory {
             id,
             key: key.to_string(),
         };
-        self.apply_mutation(&m)?;
+        Self::apply_mutation(&mut self.head_state, &m)?;
         self.pending_mutations.push(m);
         Ok(())
     }
@@ -256,7 +421,7 @@ impl Memory {
         }
 
         let m = Mutation::DeleteNode { id };
-        self.apply_mutation(&m)?;
+        Self::apply_mutation(&mut self.head_state, &m)?;
         self.pending_mutations.push(m);
         Ok(())
     }
@@ -286,89 +451,10 @@ impl Memory {
 
         let mutations = self.pending_mutations.clone();
 
-        let mut base_state = Self::replay(&self.commits)?;
-        for m in &mutations {
-            match m {
-                Mutation::CreateNode { id, ty: _ } => {
-                    if base_state.contains_key(id) {
-                        return Err(MyosotisError::Invariant(format!(
-                            "create node id {} already exists",
-                            id
-                        )));
-                    }
-                    base_state.insert(
-                        *id,
-                        Node {
-                            id: *id,
-                            ty: String::new(),
-                            fields: HashMap::new(),
-                            deleted: false,
-                        },
-                    );
-                }
-                Mutation::SetField { id, key, value } => {
-                    let existing = base_state.get(id).ok_or(MyosotisError::Invariant(format!(
-                        "set on missing node {}",
-                        id
-                    )))?;
-                    if existing.deleted {
-                        return Err(MyosotisError::NodeDeleted(*id));
-                    }
-
-                    fn check_value(
-                        v: &Value,
-                        state: &HashMap<NodeId, Node>,
-                    ) -> Result<(), MyosotisError> {
-                        match v {
-                            Value::Ref(rid) => {
-                                if !state.contains_key(rid) {
-                                    return Err(MyosotisError::Invariant(format!(
-                                        "reference to missing node {}",
-                                        rid
-                                    )));
-                                }
-                            }
-                            Value::List(vec) => {
-                                for item in vec {
-                                    check_value(item, state)?;
-                                }
-                            }
-                            Value::Map(map) => {
-                                for item in map.values() {
-                                    check_value(item, state)?;
-                                }
-                            }
-                            _ => {}
-                        }
-                        Ok(())
-                    }
-
-                    check_value(value, &base_state)?;
-                    if let Some(node) = base_state.get_mut(id) {
-                        node.fields.insert(key.clone(), value.clone());
-                    }
-                }
-                Mutation::DeleteField { id, key } => {
-                    let existing = base_state
-                        .get_mut(id)
-                        .ok_or(MyosotisError::DeleteNonexistentNode(*id))?;
-                    if existing.deleted {
-                        return Err(MyosotisError::DeleteOnDeletedNode(*id));
-                    }
-                    if existing.fields.remove(key).is_none() {
-                        return Err(MyosotisError::FieldNotFound(key.clone()));
-                    }
-                }
-                Mutation::DeleteNode { id } => {
-                    let existing = base_state
-                        .get_mut(id)
-                        .ok_or(MyosotisError::DeleteNonexistentNode(*id))?;
-                    if existing.deleted {
-                        return Err(MyosotisError::DeleteOnDeletedNode(*id));
-                    }
-                    existing.deleted = true;
-                }
-            }
+        let base_snapshot = self.snapshot_from_genesis();
+        let mut base_state = Self::replay_from_snapshot(base_snapshot.as_ref(), &self.commits)?;
+        for mutation in &mutations {
+            Self::apply_mutation(&mut base_state, mutation)?;
         }
 
         let parent_hash = if let Some(last) = self.commits.last() {
@@ -389,13 +475,9 @@ impl Memory {
 
         self.commits.push(commit);
 
-        if self.commits.len().is_multiple_of(CHECKPOINT_INTERVAL) {
-            let last = self
-                .commits
-                .last()
-                .ok_or(MyosotisError::CorruptCommitChain(
-                    "missing last commit after push".to_string(),
-                ))?;
+        if self.commits.len().is_multiple_of(CHECKPOINT_INTERVAL)
+            && let Some(last) = self.commits.last()
+        {
             let state_hash = Self::compute_state_hash(&self.head_state);
             self.checkpoints.push(Checkpoint {
                 commit_id: last.id,
@@ -409,157 +491,21 @@ impl Memory {
         Ok(())
     }
 
-    fn apply_mutation(&mut self, m: &Mutation) -> Result<(), MyosotisError> {
-        match m {
-            Mutation::CreateNode { id, ty } => {
-                if self.head_state.contains_key(id) {
-                    return Err(MyosotisError::Invariant(format!(
-                        "create existing id {}",
-                        id
-                    )));
-                }
-                let node = Node {
-                    id: *id,
-                    ty: ty.clone(),
-                    fields: HashMap::new(),
-                    deleted: false,
-                };
-                self.head_state.insert(*id, node);
-                Ok(())
-            }
-            Mutation::SetField { id, key, value } => {
-                let node = self
-                    .head_state
-                    .get_mut(id)
-                    .ok_or(MyosotisError::NodeNotFound(*id))?;
-                if node.deleted {
-                    return Err(MyosotisError::NodeDeleted(*id));
-                }
-                node.fields.insert(key.clone(), value.clone());
-                Ok(())
-            }
-            Mutation::DeleteField { id, key } => {
-                let node = self
-                    .head_state
-                    .get_mut(id)
-                    .ok_or(MyosotisError::DeleteNonexistentNode(*id))?;
-                if node.deleted {
-                    return Err(MyosotisError::DeleteOnDeletedNode(*id));
-                }
-                if node.fields.remove(key).is_none() {
-                    return Err(MyosotisError::FieldNotFound(key.clone()));
-                }
-                Ok(())
-            }
-            Mutation::DeleteNode { id } => {
-                let node = self
-                    .head_state
-                    .get_mut(id)
-                    .ok_or(MyosotisError::DeleteNonexistentNode(*id))?;
-                if node.deleted {
-                    return Err(MyosotisError::DeleteOnDeletedNode(*id));
-                }
-                node.deleted = true;
-                Ok(())
-            }
-        }
-    }
-
     pub fn replay(commits: &[Commit]) -> Result<HashMap<NodeId, Node>, MyosotisError> {
-        Self::replay_from(HashMap::new(), commits)
+        Self::replay_from_snapshot(None, commits)
     }
 
     pub fn replay_from(
-        mut state: HashMap<NodeId, Node>,
+        base_state: HashMap<NodeId, Node>,
         commits: &[Commit],
     ) -> Result<HashMap<NodeId, Node>, MyosotisError> {
-        for commit in commits {
-            for m in &commit.mutations {
-                match m {
-                    Mutation::CreateNode { id, ty } => {
-                        if state.contains_key(id) {
-                            return Err(MyosotisError::Invariant(format!(
-                                "duplicate create node {}",
-                                id
-                            )));
-                        }
-                        let node = Node {
-                            id: *id,
-                            ty: ty.clone(),
-                            fields: HashMap::new(),
-                            deleted: false,
-                        };
-                        state.insert(*id, node);
-                    }
-                    Mutation::SetField { id, key, value } => {
-                        let existing = state.get(id).ok_or(MyosotisError::Invariant(format!(
-                            "set before create {}",
-                            id
-                        )))?;
-                        if existing.deleted {
-                            return Err(MyosotisError::NodeDeleted(*id));
-                        }
-
-                        fn check_value(
-                            v: &Value,
-                            state: &HashMap<NodeId, Node>,
-                        ) -> Result<(), MyosotisError> {
-                            match v {
-                                Value::Ref(rid) => {
-                                    if !state.contains_key(rid) {
-                                        return Err(MyosotisError::Invariant(format!(
-                                            "reference to missing node {}",
-                                            rid
-                                        )));
-                                    }
-                                }
-                                Value::List(vec) => {
-                                    for item in vec {
-                                        check_value(item, state)?;
-                                    }
-                                }
-                                Value::Map(map) => {
-                                    for item in map.values() {
-                                        check_value(item, state)?;
-                                    }
-                                }
-                                _ => {}
-                            }
-                            Ok(())
-                        }
-
-                        check_value(value, &state)?;
-                        let node = state.get_mut(id).ok_or(MyosotisError::Invariant(format!(
-                            "set before create {}",
-                            id
-                        )))?;
-                        node.fields.insert(key.clone(), value.clone());
-                    }
-                    Mutation::DeleteField { id, key } => {
-                        let node = state
-                            .get_mut(id)
-                            .ok_or(MyosotisError::DeleteNonexistentNode(*id))?;
-                        if node.deleted {
-                            return Err(MyosotisError::DeleteOnDeletedNode(*id));
-                        }
-                        if node.fields.remove(key).is_none() {
-                            return Err(MyosotisError::FieldNotFound(key.clone()));
-                        }
-                    }
-                    Mutation::DeleteNode { id } => {
-                        let node = state
-                            .get_mut(id)
-                            .ok_or(MyosotisError::DeleteNonexistentNode(*id))?;
-                        if node.deleted {
-                            return Err(MyosotisError::DeleteOnDeletedNode(*id));
-                        }
-                        node.deleted = true;
-                    }
-                }
-            }
-        }
-
-        Ok(state)
+        let snapshot = Snapshot {
+            state_hash: Self::compute_state_hash(&base_state),
+            state: base_state,
+            commit_id: None,
+            commit_hash: None,
+        };
+        Self::replay_from_snapshot(Some(&snapshot), commits)
     }
 
     pub fn state_at_commit(
@@ -572,31 +518,24 @@ impl Memory {
             .position(|c| c.id == target_commit_id)
             .ok_or(MyosotisError::CommitNotFound(target_commit_id))?;
 
-        let mut base_state: HashMap<NodeId, Node> = self.genesis_state.clone().unwrap_or_default();
-        let mut start_index = 0usize;
-
-        if let Some(cp) = self
-            .checkpoints
-            .iter()
-            .filter(|c| c.commit_id <= target_commit_id)
-            .max_by_key(|c| c.commit_id)
-        {
-            base_state = cp.state.clone();
-            if let Some(pos) = self.commits.iter().position(|c| c.id == cp.commit_id) {
-                start_index = pos + 1;
-            } else {
-                return Err(MyosotisError::InvalidCheckpoint);
-            }
-        }
+        let snapshot = self.snapshot_for_commit(target_commit_id);
+        let start_index = self.commits_start_index_from_snapshot(snapshot.as_ref())?;
 
         if start_index > target_index + 1 {
             return Err(MyosotisError::InvalidCheckpoint);
         }
 
-        Self::replay_from(base_state, &self.commits[start_index..=target_index])
+        Self::replay_from_snapshot(snapshot.as_ref(), &self.commits[start_index..=target_index])
     }
 
-    pub fn validate_with_mode(&self, verify_hashes: bool) -> Result<(), MyosotisError> {
+    fn validate_schema(&self) -> Result<(), MyosotisError> {
+        if self.next_node_id == 0 {
+            return Err(MyosotisError::MalformedFileStructure);
+        }
+        Ok(())
+    }
+
+    fn validate_snapshot_integrity(&self) -> Result<(), MyosotisError> {
         if let Some(genesis_state) = &self.genesis_state {
             let expected_hash = Self::compute_state_hash(genesis_state);
             if self.genesis_state_hash != Some(expected_hash) {
@@ -606,6 +545,21 @@ impl Memory {
             return Err(MyosotisError::CorruptGenesisHash);
         }
 
+        for checkpoint in &self.checkpoints {
+            let commit = self
+                .commits
+                .iter()
+                .find(|c| c.id == checkpoint.commit_id)
+                .ok_or(MyosotisError::CheckpointCommitMismatch)?;
+            if commit.hash != checkpoint.commit_hash {
+                return Err(MyosotisError::CheckpointCommitMismatch);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn validate_commit_chain(&self) -> Result<(), MyosotisError> {
         for (i, commit) in self.commits.iter().enumerate() {
             if i > 0 {
                 let prev_id = self.commits[i - 1].id;
@@ -644,51 +598,41 @@ impl Memory {
                     return Err(MyosotisError::CorruptParentHash);
                 }
             }
+        }
 
-            if verify_hashes {
-                let recomputed = Self::compute_commit_hash(
-                    commit.parent_hash,
-                    &commit.message,
-                    &commit.mutations,
-                );
-                if commit.hash != recomputed {
-                    return Err(MyosotisError::CorruptCommitHash);
-                }
+        Ok(())
+    }
+
+    fn validate_hash_chain(&self, verify_hashes: bool) -> Result<(), MyosotisError> {
+        if !verify_hashes {
+            return Ok(());
+        }
+
+        for commit in &self.commits {
+            let recomputed =
+                Self::compute_commit_hash(commit.parent_hash, &commit.message, &commit.mutations);
+            if commit.hash != recomputed {
+                return Err(MyosotisError::CorruptCommitHash);
             }
         }
 
         for checkpoint in &self.checkpoints {
-            let commit = self
-                .commits
-                .iter()
-                .find(|c| c.id == checkpoint.commit_id)
-                .ok_or(MyosotisError::CheckpointCommitMismatch)?;
-            if commit.hash != checkpoint.commit_hash {
-                return Err(MyosotisError::CheckpointCommitMismatch);
-            }
-            if verify_hashes {
-                let recomputed_state_hash = Self::compute_state_hash(&checkpoint.state);
-                if recomputed_state_hash != checkpoint.state_hash {
-                    return Err(MyosotisError::CorruptCheckpointHash);
-                }
+            let recomputed_state_hash = Self::compute_state_hash(&checkpoint.state);
+            if recomputed_state_hash != checkpoint.state_hash {
+                return Err(MyosotisError::CorruptCheckpointHash);
             }
         }
 
-        let state = if let Some(cp) = self.checkpoints.iter().max_by_key(|c| c.commit_id) {
-            let start_index = self
-                .commits
-                .iter()
-                .position(|c| c.id == cp.commit_id)
-                .ok_or(MyosotisError::InvalidCheckpoint)?
-                + 1;
-            Self::replay_from(cp.state.clone(), &self.commits[start_index..])?
-        } else {
-            Self::replay_from(
-                self.genesis_state.clone().unwrap_or_default(),
-                &self.commits,
-            )?
-        };
+        Ok(())
+    }
 
+    fn validate_semantic_replay(&self) -> Result<State, MyosotisError> {
+        let snapshot = self.latest_snapshot_for_head();
+        let start_index = self.commits_start_index_from_snapshot(snapshot.as_ref())?;
+        Self::replay_from_snapshot(snapshot.as_ref(), &self.commits[start_index..])
+    }
+
+    fn validate_node_id_bounds(&self, state: &State) -> Result<(), MyosotisError> {
         let max_id = state.keys().copied().max().unwrap_or(0);
         if self.next_node_id <= max_id {
             return Err(MyosotisError::Invariant(format!(
@@ -697,12 +641,22 @@ impl Memory {
             )));
         }
 
-        if !self.head_state.is_empty() && self.head_state != state {
+        if !self.head_state.is_empty() && self.head_state != *state {
             return Err(MyosotisError::Invariant(
                 "head_state does not match replayed state".to_string(),
             ));
         }
 
+        Ok(())
+    }
+
+    pub fn validate_with_mode(&self, verify_hashes: bool) -> Result<(), MyosotisError> {
+        self.validate_schema()?;
+        self.validate_snapshot_integrity()?;
+        self.validate_commit_chain()?;
+        self.validate_hash_chain(verify_hashes)?;
+        let state = self.validate_semantic_replay()?;
+        self.validate_node_id_bounds(&state)?;
         Ok(())
     }
 
