@@ -94,8 +94,8 @@ pub fn load_with_mode(path: &str, mode: LoadMode) -> Result<Memory> {
     let data =
         fs::read_to_string(path).with_context(|| format!("Failed to read file: {}", path))?;
 
-    let root: serde_json::Value =
-        serde_json::from_str(&data).map_err(|_| anyhow::anyhow!(MyosotisError::MalformedFileStructure))?;
+    let root: serde_json::Value = serde_json::from_str(&data)
+        .map_err(|_| anyhow::anyhow!(MyosotisError::MalformedFileStructure))?;
 
     let obj = root
         .as_object()
@@ -112,13 +112,16 @@ pub fn load_with_mode(path: &str, mode: LoadMode) -> Result<Memory> {
         let version = obj
             .get("format_version")
             .and_then(|v| v.as_u64())
-            .ok_or_else(|| anyhow::anyhow!(MyosotisError::MissingFormatVersion))? as u32;
+            .ok_or_else(|| anyhow::anyhow!(MyosotisError::MissingFormatVersion))?
+            as u32;
 
         if version == 0 {
             return Err(anyhow::anyhow!(MyosotisError::MissingFormatVersion));
         }
         if version > FORMAT_VERSION {
-            return Err(anyhow::anyhow!(MyosotisError::UnsupportedFormatVersion(version)));
+            return Err(anyhow::anyhow!(MyosotisError::UnsupportedFormatVersion(
+                version
+            )));
         }
 
         let magic = obj
@@ -140,8 +143,8 @@ pub fn load_with_mode(path: &str, mode: LoadMode) -> Result<Memory> {
         return Err(anyhow::anyhow!(MyosotisError::InvalidFileMagic));
     }
 
-    let legacy: LegacyStorageFormatV05 =
-        serde_json::from_str(&data).map_err(|_| anyhow::anyhow!(MyosotisError::MalformedFileStructure))?;
+    let legacy: LegacyStorageFormatV05 = serde_json::from_str(&data)
+        .map_err(|_| anyhow::anyhow!(MyosotisError::MalformedFileStructure))?;
     let sf = StorageFormatV1 {
         magic: FILE_MAGIC.to_string(),
         format_version: FORMAT_VERSION,
