@@ -1,6 +1,6 @@
 use myosotis::memory::CHECKPOINT_INTERVAL;
 use myosotis::node::Value;
-use myosotis::{storage, Memory};
+use myosotis::{Memory, storage};
 use std::fs;
 
 fn cleanup(path: &str) {
@@ -97,10 +97,12 @@ fn checkpoint_interaction_after_compaction() -> Result<(), Box<dyn std::error::E
 
     // checkpoints at or before compaction target are removed
     if let Some(first_commit) = compacted.commits.first() {
-        assert!(compacted
-            .checkpoints
-            .iter()
-            .all(|cp| cp.commit_id >= first_commit.id));
+        assert!(
+            compacted
+                .checkpoints
+                .iter()
+                .all(|cp| cp.commit_id >= first_commit.id)
+        );
     }
 
     cleanup(path);
